@@ -1,9 +1,18 @@
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
-SQLAlchemy==2.0.30
-psycopg2-binary==2.9.9
-alembic==1.13.1
-pydantic==2.7.1
-pydantic-settings==2.2.1
-requests==2.31.0
+# For accessing the SEC EDGAR API
+python-dotenv
+python-telegram-bot
+yagmail
+sec-edgar-api
+
+# For loading .env files
 python-dotenv==1.0.1
+
+# For data manipulation
+pandas
+
+# For downloading SEC index files
+python-edgar
+
+# For making HTTP requests
+requests==2.31.0
+
