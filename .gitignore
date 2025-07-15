@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Ignore AI_context directory
+AI_context/
+
+
 # C extensions
 *.so
 

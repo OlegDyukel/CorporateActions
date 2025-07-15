@@ -1,8 +1,5 @@
-# For accessing the SEC EDGAR API
-python-dotenv
+# For sending notifications
 python-telegram-bot
-yagmail
-sec-edgar-api
 
 # For loading .env files
 python-dotenv==1.0.1
@@ -10,9 +7,5 @@ python-dotenv==1.0.1
 # For data manipulation
 pandas
 
-# For downloading SEC index files
-python-edgar
-
 # For making HTTP requests
 requests==2.31.0
-

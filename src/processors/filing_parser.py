@@ -3,46 +3,28 @@ from typing import Dict
 
 def parse_filing_header(content: str) -> Dict[str, str]:
     """
-    Parses the header of an SEC filing to extract key metadata.
-
-    Args:
-        content: The full text content of the filing.
-
-    Returns:
-        A dictionary with extracted fields.
+    Parses the header of an SEC filing to extract key information.
+    Finds the <SEC-HEADER> block and extracts key-value pairs from it.
     """
-    data = {}
-    try:
-        header_parts = content.split('</SEC-HEADER>')
-        if not header_parts:
-            return data
+    header_data = {}
+    header_match = re.search(r'<SEC-HEADER>(.*?)</SEC-HEADER>', content, re.DOTALL)
+    
+    if not header_match:
+        return header_data
 
-        header_text = header_parts[0]
-
-        patterns = {
-            'accession_number': r'ACCESSION NUMBER:\s*(\S+)',
-            'company_name': r'COMPANY CONFORMED NAME:\s*(.+)',
-            'cik': r'CENTRAL INDEX KEY:\s*(\S+)',
-            'form_type': r'CONFORMED SUBMISSION TYPE:\s*(\S+)',
-            'filed_as_of_date': r'FILED AS OF DATE:\s*(\d+)',
-            'date_as_of_change': r'DATE AS OF CHANGE:\s*(\d+)',
-        }
-
-        for key, pattern in patterns.items():
-            match = re.search(pattern, header_text, re.IGNORECASE)
-            if match:
-                data[key] = match.group(1).strip()
-
-        # Fallback for company name if the primary pattern fails
-        if 'company_name' not in data:
-            match = re.search(r'COMPANY DATA:[\s\S]*?COMPANY CONFORMED NAME:\s*(.+)', header_text, re.IGNORECASE)
-            if match:
-                data['company_name'] = match.group(1).strip().split('\n')[0]
-
-        return data
-    except Exception as e:
-        print(f"[Parser Error] An unexpected error occurred: {e}")
-        return {}
+    header_text = header_match.group(1)
+    
+    # A more robust regex to capture all key-value pairs.
+    pattern = re.compile(r'([A-Z][A-Z\s-]+):\s+(.+)')
+    
+    for line in header_text.split('\n'):
+        match = pattern.match(line.strip())
+        if match:
+            key = match.group(1).strip()
+            value = match.group(2).strip()
+            header_data[key] = value
+            
+    return header_data
 
 def classify_action_type(content: str) -> str:
     """

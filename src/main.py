@@ -1,16 +1,20 @@
-import os
 import sys
-from dotenv import load_dotenv
-import asyncio
-from typing import List
-import telegram
-import yagmail
 from pathlib import Path
 
-# Add project root to sys.path to allow for absolute imports
+# This block must be the first thing in the file to ensure
+# that the 'src' module can be found by Python.
 project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
+
+# Now that the path is set, we can import our modules
+import asyncio
+import os
+from typing import List
+import telegram
+import smtplib
+from email.message import EmailMessage
+from dotenv import load_dotenv
 
 from src.models.filing import CorporateActionFiling
 from src.sources.master_index import get_recent_8k_filings
@@ -18,23 +22,30 @@ from src.processors.filing_processor import fetch_filing_text
 from src.processors.filing_parser import parse_filing_header, classify_action_type
 from src.utils.cik_mapper import CIKMapper
 
+# Load environment variables from the .env file in the project root
+dotenv_path = project_root / ".env"
+# Use override=True to ensure .env variables take precedence over system variables
+load_dotenv(dotenv_path=dotenv_path, override=True)
+
 
 def format_filing_for_display(filing: CorporateActionFiling) -> str:
     """Formats a single filing for a readable display."""
     return (
-        f"<b>Company:</b> {filing.company_name} ({filing.ticker})\n"
+        f"<b>Company:</b> {filing.company_name}\n"
+        f"<b>Trading Ticker:</b> {filing.ticker}\n"
+        f"<b>Exchange:</b> {filing.exchange}\n"
         f"<b>Action Type:</b> {filing.action_type}\n"
         f"<b>Form Type:</b> {filing.form_type}\n"
         f"<b>Filed Date:</b> {filing.filed_as_of_date}\n"
         f"<b>Accession No.:</b> {filing.accession_number}\n"
-        f"<a href='https://www.sec.gov/Archives/edgar/data/{filing.file_name}'>Link to Filing</a>"
+        f"<a href='https://www.sec.gov/Archives/{filing.file_name}'>Link to Filing</a>"
     )
 
 
 async def send_to_telegram(filings: List[CorporateActionFiling]):
     """Sends the list of processed filings to a Telegram channel."""
-    bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
-    channel_id = os.getenv('TELEGRAM_CHANNEL_ID')
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    channel_id = os.getenv("TELEGRAM_CHANNEL_ID")
 
     if not bot_token or not channel_id:
         print("Telegram bot token or channel ID not found in .env file. Skipping.")
@@ -49,47 +60,67 @@ async def send_to_telegram(filings: List[CorporateActionFiling]):
     print("-----------------------------------")
 
 
-def send_to_email(filings: List[CorporateActionFiling]):
-    """Sends the list of processed filings to an email list."""
-    sender_email = os.getenv('EMAIL_SENDER_ADDRESS')
-    sender_password = os.getenv('EMAIL_SENDER_PASSWORD')
-    recipients = os.getenv('EMAIL_RECIPIENTS')
+def send_gmail_email(filings: List[CorporateActionFiling]):
+    """Sends the list of processed filings via Gmail SMTP."""
+    # --- Get Gmail credentials from environment variables ---
+    sender_address = os.getenv("EMAIL_SENDER_ADDRESS")
+    sender_password = os.getenv("EMAIL_SENDER_PASSWORD")
+    recipients = os.getenv("EMAIL_RECIPIENTS")
 
-    if not sender_email or not sender_password or not recipients:
-        print("Email credentials or recipients not found in .env file. Skipping.")
+    if not all([sender_address, sender_password, recipients]):
+        print("Gmail credentials or recipients not found in .env file. Skipping.")
         return
 
-    yag = yagmail.SMTP(sender_email, sender_password)
-    
-    subject = "Daily Corporate Actions Digest"
+    # --- Format the email content ---
+    subject = "Daily Corporate Actions Digest (via Gmail)"
     html_body = "<h1>Latest Corporate Action Filings</h1>"
     html_body += "<hr>".join([format_filing_for_display(f) for f in filings])
+    
+    # Create the plain text version as a fallback
+    text_body = "Latest Corporate Action Filings\n\n"
+    text_body += "\n---\n".join([
+        f"Company: {f.company_name} ({f.ticker})\n"
+        f"Action Type: {f.action_type}\n"
+        f"Filed Date: {f.filed_as_of_date}"
+        for f in filings
+    ])
 
-    print("\n--- Sending filings to Email ---")
-    yag.send(
-        to=recipients.split(','),
-        subject=subject,
-        contents=html_body
-    )
-    print("--------------------------------")
+    # --- Create and send the email message ---
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = sender_address
+    msg["To"] = recipients
+    msg.set_content(text_body)
+    msg.add_alternative(html_body, subtype='html')
+
+    print("\n--- Sending filings to Gmail ---")
+    try:
+        # Use SMTP with STARTTLS for port 587
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()  # Secure the connection
+            server.login(sender_address, sender_password)
+            server.send_message(msg)
+        print("Email sent successfully via Gmail!")
+        print("--------------------------------")
+    except smtplib.SMTPException as e:
+        print(f"[Gmail Error] Failed to send email: {e}")
 
 
 async def main():
-    load_dotenv()
+    # Load EDGAR identity from environment variables for the User-Agent string.
     identity = os.getenv("EDGAR_IDENTITY")
     email = os.getenv("EDGAR_EMAIL")
-    user_agent = f"{identity} {email}"
 
     if not identity or not email:
-        raise ValueError("EDGAR_IDENTITY and EDGAR_EMAIL must be set in .env")
-
+        print("EDGAR_IDENTITY or EDGAR_EMAIL not found in .env file. Exiting.")
+        return
     user_agent = f"{identity} {email}"
     cik_mapper = CIKMapper(user_agent=user_agent)
 
     print("Fetching recent 8-K filings...")
-    # We are using a fixed date here for testing since the system clock is set to the future.
-    # This ensures we can test with real, historical data.
-    recent_filings_df = get_recent_8k_filings(base_date_str="2025-06-28", days_ago=0, user_agent=user_agent)
+    # Fetches filings from the most recent business day.
+    # The function will search backwards from yesterday to find the last day with available data.
+    recent_filings_df = get_recent_8k_filings(days_ago=1, user_agent=user_agent)
 
     if recent_filings_df.empty:
         print("No recent 8-K filings found.")
@@ -110,16 +141,20 @@ async def main():
 
         action_type = classify_action_type(content)
 
-        cik = header_data.get('cik', '')
-        ticker = cik_mapper.get_ticker(cik) if cik else 'N/A'
+        cik = header_data.get('CENTRAL INDEX KEY', 'N/A')
+        print(f"DEBUG: Processing {header_data.get('COMPANY CONFORMED NAME', 'N/A')} with CIK {cik}")
+        ticker = cik_mapper.get_ticker_by_cik(cik) or 'N/A'
+        exchange = cik_mapper.get_exchange_by_cik(cik) or 'N/A'
+        print(f"DEBUG: Found Ticker: {ticker}, Exchange: {exchange}")
 
         filing = CorporateActionFiling(
-            accession_number=header_data.get('accession_number', 'N/A'),
-            company_name=header_data.get('company_name', 'N/A'),
+            cik=cik,
+            company_name=header_data.get('COMPANY CONFORMED NAME', 'N/A'),
+            form_type=header_data.get('CONFORMED SUBMISSION TYPE', 'N/A'),
+            filed_as_of_date=header_data.get('FILED AS OF DATE', 'N/A'),
+            accession_number=header_data.get('ACCESSION NUMBER', 'N/A'),
             ticker=ticker,
-            form_type=header_data.get('form_type', 'N/A'),
-            filed_as_of_date=header_data.get('filed_as_of_date', 'N/A'),
-            date_as_of_change=header_data.get('date_as_of_change', 'N/A'),
+            exchange=exchange,
             action_type=action_type,
             file_name=file_name,
             content=content
@@ -128,7 +163,7 @@ async def main():
 
     print("\n--- Processed Corporate Action Filings ---")
     for filing in processed_filings:
-        print(f"\nCompany: {filing.company_name} ({filing.ticker})")
+        print(f"\nCompany: {filing.company_name} ({filing.ticker}:{filing.exchange})")
         print(f"Action Type: {filing.action_type}")
         print(f"Form Type: {filing.form_type}")
         print(f"Filed Date: {filing.filed_as_of_date}")
@@ -139,7 +174,9 @@ async def main():
 
     # Send notifications
     await send_to_telegram(processed_filings)
-    # send_to_email(processed_filings)
+
+    # Send notifications via Gmail
+    await asyncio.to_thread(send_gmail_email, processed_filings)
 
 
 if __name__ == "__main__":

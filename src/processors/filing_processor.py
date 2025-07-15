@@ -27,3 +27,4 @@ def fetch_filing_text(file_name: str, user_agent: str) -> str:
     except requests.exceptions.RequestException as e:
         print(f"Could not fetch filing {file_name}: {e}")
         return ""
+

@@ -1,16 +1,18 @@
 from dataclasses import dataclass
+from typing import Optional
 
 @dataclass
 class CorporateActionFiling:
     """
-    Represents a corporate action filing with structured data.
+    Represents a corporate action filing with extracted details.
     """
-    accession_number: str
+    cik: str
     company_name: str
-    ticker: str
     form_type: str
     filed_as_of_date: str
-    date_as_of_change: str
+    accession_number: str
+    ticker: str
     action_type: str
     file_name: str
     content: str
+    exchange: Optional[str] = None
