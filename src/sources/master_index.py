@@ -60,6 +60,7 @@ def get_recent_8k_filings(days_ago: int = 1, base_date_str: Optional[str] = None
 
             # Add accession_number from the file_name
             df_8k['accession_number'] = df_8k['file_name'].apply(lambda x: os.path.basename(x).replace('.txt', ''))
+            df_8k['formatted_date_filed'] = pd.to_datetime(df_8k['date_filed']).dt.strftime('%Y-%m-%d')
             print(f"Found {len(df_8k)} 8-K filings for {current_date.strftime('%Y-%m-%d')}.")
             return df_8k
         else:

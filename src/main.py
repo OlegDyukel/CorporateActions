@@ -21,6 +21,7 @@ from src.sources.master_index import get_recent_8k_filings
 from src.processors.filing_processor import fetch_filing_text
 from src.processors.filing_parser import parse_filing_header, classify_action_type
 from src.utils.cik_mapper import CIKMapper
+from src.utils.filing_link_converter import convert_txt_link_to_html
 
 # Load environment variables from the .env file in the project root
 dotenv_path = project_root / ".env"
@@ -38,7 +39,7 @@ def format_filing_for_display(filing: CorporateActionFiling) -> str:
         f"<b>Form Type:</b> {filing.form_type}\n"
         f"<b>Filed Date:</b> {filing.filed_as_of_date}\n"
         f"<b>Accession No.:</b> {filing.accession_number}\n"
-        f"<a href='https://www.sec.gov/Archives/{filing.file_name}'>Link to Filing</a>"
+        f"<a href='{filing.html_link}'>Link to Filing</a>"
     )
 
 
@@ -147,6 +148,10 @@ async def main():
         exchange = cik_mapper.get_exchange_by_cik(cik) or 'N/A'
         print(f"DEBUG: Found Ticker: {ticker}, Exchange: {exchange}")
 
+        # Construct the full .txt URL to pass to the converter
+        txt_url = f"https://www.sec.gov/Archives/{file_name}"
+        html_link = convert_txt_link_to_html(txt_url, user_agent)
+
         filing = CorporateActionFiling(
             cik=cik,
             company_name=header_data.get('COMPANY CONFORMED NAME', 'N/A'),
@@ -157,7 +162,8 @@ async def main():
             exchange=exchange,
             action_type=action_type,
             file_name=file_name,
-            content=content
+            content=content,
+            html_link=html_link or txt_url  # Fallback to .txt link if conversion fails
         )
         processed_filings.append(filing)
 

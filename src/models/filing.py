@@ -16,3 +16,4 @@ class CorporateActionFiling:
     file_name: str
     content: str
     exchange: Optional[str] = None
+    html_link: Optional[str] = None
