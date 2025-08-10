@@ -1,44 +1,52 @@
 # Corporate Actions Notifier
 
-This project automates the process of tracking and reporting corporate action events from U.S. Securities and Exchange Commission (SEC) EDGAR filings. It fetches daily 8-K filings, parses them to identify significant corporate events, and sends notifications via Telegram and email.
+This project tracks and reports corporate action events across multiple markets (U.S., Europe, Japan, etc.). It currently ships with a U.S. SEC EDGAR connector and a pluggable architecture to add others. It fetches recent announcements/filings, parses them, classifies the event, and sends notifications via Telegram, email, Slack and API (Slack/webhooks planned).
 
 ## How It Works
 
 The application follows a simple data processing pipeline:
 
-1.  **Fetch Index Files**: It starts by downloading the daily master index file from the SEC EDGAR database. These files contain a list of all filings submitted on a given day.
-2.  **Identify 8-K Filings**: From the master index, it filters for Form 8-K filings, which are used to announce major events that shareholders should know about.
-3.  **Fetch Filing Content**: For each 8-K filing identified, it fetches the full text content from the SEC archives.
-4.  **Parse and Classify**: The content of each filing is then parsed to extract key metadata from the header (e.g., company name, CIK, filing date). The system also scans the text to classify the type of corporate action (e.g., Merger/Acquisition, Dividend, Bankruptcy).
-5.  **Enrich Data**: The company's Central Index Key (CIK) is used to look up its stock ticker symbol, providing more context.
-6.  **Send Notifications**: Finally, formatted summaries of the processed filings are sent out to a configured Telegram channel and/or a list of email recipients.
+1.  **Discover sources**: Iterate over the enabled market connectors (e.g., SEC EDGAR, future EU/JP sources).
+2.  **Fetch listings/feeds**: Download daily indexes or RSS/JSON feeds for recent announcements/filings.
+3.  **Fetch full content**: Retrieve the full text or HTML for each item.
+4.  **Parse & normalize**: Extract headers/metadata and normalize into the internal `CorporateAction` model.
+5.  **Classify corporate actions**: Determine event types (e.g., merger, dividend, split).
+6.  **Enrich**: Map to tickers/exchanges and add context as available per market.
+7.  **Notify**: Send formatted summaries to configured channels.
 
 ## Features
 
-- **Automated 8-K Filings Retrieval**: Automatically fetches the latest 8-K filings from the SEC.
-- **Corporate Action Classification**: Intelligently classifies filings into categories like 'Merger/Acquisition', 'Dividend', 'Stock Split', and more.
-- **CIK to Ticker Mapping**: Enriches filing data with stock ticker symbols.
-- **Multi-Channel Notifications**: Delivers alerts via Telegram and email.
-- **Extensible**: Designed with a modular structure to easily support new data sources or notification channels.
-- **Resilient**: Includes logic to handle days with no SEC filings (e.g., weekends and holidays).
+- **Pluggable source connectors**: SEC EDGAR implemented; add EU/JP/etc. by creating new modules in `src/sources/`.
+- **Corporate action classification**: Classifies events such as mergers, dividends, splits, and more.
+- **Normalization to a common model**: Everything is mapped to `CorporateAction` (Pydantic v2) for consistent processing.
+- **Enrichment**: CIK → ticker/exchange via `src/utils/cik_mapper.py` (US); additional mappers can be added per market.
+- **Multi-channel notifications**: Telegram and Gmail supported today; Slack/webhooks are on the roadmap.
+- **Resilient**: Handles days with no data and works across market holidays.
 
 ## Project Structure
 
 ```
-.env.example         # Example environment variables
-README.md            # This file
-requirements.txt     # Python dependencies
+README.md                      # Project overview
+requirements.txt               # Python dependencies
+.env                           # Environment variables (create manually)
 src/
-├── main.py            # Main application entry point
+├── main.py                    # Entry point; runs the default SEC pipeline
+├── config.py                  # Loads environment variables
+├── core/                      # Future orchestrators/pipelines
 ├── models/
-│   └── filing.py      # Defines the CorporateActionFiling data model
+│   ├── corporate_action_model.py  # CorporateAction data model (Pydantic v2)
+│   └── filing.py                  # Legacy simple model (deprecated)
 ├── processors/
-│   ├── filing_parser.py   # Parses filing content and classifies actions
-│   └── filing_processor.py# Fetches full filing text
+│   ├── filing_processor.py    # Fetches full filing text/content
+│   ├── filing_parser.py       # Parses content and classifies actions
+│   └── html_parser.py         # Converts SEC HTML to clean text
 ├── sources/
-│   └── master_index.py  # Fetches and parses the SEC master index
-└── utils/
-    └── cik_mapper.py    # Utility for mapping CIKs to tickers
+│   └── master_index.py        # SEC EDGAR connector (daily master index)
+├── utils/
+│   ├── cik_mapper.py          # Maps CIK -> ticker/exchange (US)
+│   └── filing_link_converter.py # Converts .txt to HTML filing link
+└── notifiers/                 # Placeholder for future notifier modules
+tests/                         # Test suite (WIP)
 ```
 
 ## Setup and Usage
@@ -46,9 +54,10 @@ src/
 ### 1. Prerequisites
 
 - Python 3.9+
-- An account with the SEC EDGAR system to get a User-Agent string.
-- A Telegram Bot Token and Channel ID (optional).
-- An email account for sending notifications (optional).
+- Internet access; respect each source’s terms of use and robots policies.
+- For the default U.S. SEC connector: `EDGAR_IDENTITY` and `EDGAR_EMAIL` to form a compliant User-Agent.
+- Optional: Telegram Bot Token and Channel ID for Telegram notifications.
+- Optional: Gmail account (or SMTP app password) for email notifications.
 
 ### 2. Installation
 
@@ -67,15 +76,12 @@ src/
 
 ### 3. Configuration
 
-1.  **Create a `.env` file** in the project root by copying the example:
-    ```bash
-    cp .env.example .env
-    ```
+1.  **Create a `.env` file** in the project root.
 
-2.  **Edit the `.env` file** with your credentials. The `EDGAR_IDENTITY` and `EDGAR_EMAIL` are required for making requests to the SEC.
+2.  **Populate** it with the following keys (EDGAR is required for the default U.S. SEC connector):
 
     ```env
-    # SEC EDGAR Credentials (Required)
+    # SEC EDGAR Credentials (Required for default U.S. SEC connector)
     EDGAR_IDENTITY="Your Name or Company"
     EDGAR_EMAIL="your.email@example.com"
 

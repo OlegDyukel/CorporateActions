@@ -17,3 +17,4 @@ class CorporateActionFiling:
     content: str
     exchange: Optional[str] = None
     html_link: Optional[str] = None
+    parsed_text: Optional[str] = None

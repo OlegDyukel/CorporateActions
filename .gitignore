@@ -73,3 +73,7 @@ venv/
 
 # Env
 .env
+
+# Local test scripts
+src/test.py
+test.py
