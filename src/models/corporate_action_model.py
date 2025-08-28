@@ -14,7 +14,7 @@ from decimal import Decimal
 import hashlib
 import re
 import uuid
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -280,6 +280,10 @@ class CorporateAction(BaseModel):
 
     # Free-form notes
     notes: Optional[str] = None
+
+    # Flexible extension bag for pipeline-specific metadata.
+    # Example: {"extra_tickers": ["GOOG"], "all_tickers": ["GOOG","GOOGL"]}
+    extras: Optional[Dict[str, Any]] = None
 
     # -------------------
     # Validators

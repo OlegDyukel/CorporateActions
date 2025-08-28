@@ -15,3 +15,11 @@ beautifulsoup4
 
 # For data models (Pydantic v2)
 pydantic>=2.6.0,<3.0.0
+
+# For LLM extraction (OpenAI SDK v1)
+openai>=1.0.0
+
+# For database access and migrations
+SQLAlchemy>=2.0
+alembic>=1.13
+psycopg[binary]>=3.1

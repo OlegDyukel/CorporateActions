@@ -31,6 +31,15 @@ from src.processors.filing_parser import parse_filing_header, classify_action_ty
 from src.processors.html_parser import parse_html_to_text
 from src.utils.cik_mapper import CIKMapper
 from src.utils.filing_link_converter import convert_txt_link_to_html
+from src.processors.llm_extractor import llm_extract, apply_llm_to_corporate_action
+from src.utils.exchange_resolver import get_exchange_resolver
+from src.core.ca_repository import persist_corporate_actions
+from src.processors.effective_date_resolver import (
+    resolve_effective_date,
+    format_estimate_for_display,
+)
+from src.sources.sec_submissions import get_recent_company_filings
+from src.utils.metrics import Metrics
 
 # Load environment variables from the .env file in the project root
 dotenv_path = project_root / ".env"
@@ -70,28 +79,32 @@ def _parse_filed_date(date_str: str):
     return None
 
 
-def _to_mic(exchange_name: str) -> str:
+def _to_mic(exchange_name: Optional[str]) -> Optional[str]:
     if not exchange_name:
         return None
-    # Minimal heuristic mapping; extend as needed
-    mapping = {
-        "NASDAQ": "XNAS",
-        "NYSE": "XNYS",
-        "NYSE AMERICAN": "XASE",
-        "NYSE MKT": "XASE",
-        "NYSE ARCA": "ARCX",
-        "CBOE BZX": "BATS",
-        "CBOE BYX": "BATY",
-        "CBOE EDGX": "EDGX",
-        "CBOE EDGA": "EDGA",
-        "OTC": "OTCM",
-    }
-    key = exchange_name.strip().upper()
-    return mapping.get(key)
+    resolver = get_exchange_resolver()
+    return resolver.to_mic(exchange_name)
+
+
+def _mic_to_exchange_name(mic: Optional[str]) -> Optional[str]:
+    if not mic:
+        return None
+    resolver = get_exchange_resolver()
+    return resolver.mic_to_name(mic)
 
 
 def _first_source(filing: CorporateAction) -> Optional[SourceInfo]:
     return filing.sources[0] if filing.sources else None
+
+
+def _merge_extras(base: Optional[dict], patch: Optional[dict]) -> Optional[dict]:
+    if not patch:
+        return base
+    if not base:
+        return dict(patch)
+    merged = dict(base)
+    merged.update(patch)
+    return merged
 
 
 def format_filing_for_display(filing: CorporateAction) -> str:
@@ -102,14 +115,25 @@ def format_filing_for_display(filing: CorporateAction) -> str:
     accession = src.reference_id if src and src.reference_id else "N/A"
     link = src.source_url if src and src.source_url else "#"
     classification_note = filing.notes or ""
+    # Determine effective/estimated text
+    effective_line = (
+        f"<b>Effective Date:</b> {filing.effective_date.isoformat()}\n"
+        if filing.effective_date
+        else (
+            (lambda est: f"<b>Estimated Effective:</b> {est}\n" if est else "")(
+                format_estimate_for_display(getattr(filing, "extras", None))
+            )
+        )
+    )
     return (
         f"<b>Company:</b> {filing.issuer.name or 'N/A'}\n"
         f"<b>Trading Ticker:</b> {filing.security.ticker or 'N/A'}\n"
-        f"<b>Exchange:</b> {filing.security.exchange_mic or 'N/A'}\n"
-        f"<b>Action Type:</b> {filing.action_type}\n"
+        f"<b>Exchange:</b> {_mic_to_exchange_name(filing.security.exchange_mic) if filing.security.exchange_mic else 'N/A'}\n"
+        ""
         + (f"<b>Classification:</b> {classification_note}\n" if classification_note else "")
         + f"<b>Form Type:</b> {doc_type}\n"
         + f"<b>Filed Date:</b> {filed_date}\n"
+        + effective_line
         + f"<b>Accession No.:</b> {accession}\n"
         + f"<a href='{link}'>Link to Filing</a>"
     )
@@ -155,11 +179,18 @@ def send_gmail_email(filings: List[CorporateAction]):
     for f in filings:
         src = _first_source(f)
         filed_date = src.filing_date.isoformat() if (src and src.filing_date) else "N/A"
+        est_txt = None
+        if not f.effective_date:
+            est_txt = format_estimate_for_display(getattr(f, "extras", None))
         lines.append(
             "\n".join([
                 f"Company: {f.issuer.name or 'N/A'} ({f.security.ticker or 'N/A'})",
-                f"Action Type: {f.action_type}",
                 f"Filed Date: {filed_date}",
+                (
+                    f"Effective Date: {f.effective_date.isoformat()}"
+                    if f.effective_date
+                    else (f"Estimated Effective: {est_txt}" if est_txt else "")
+                ),
             ])
         )
     text_body += "\n---\n".join(lines)
@@ -199,7 +230,7 @@ async def main():
     print("Fetching recent 8-K filings...")
     # Fetches filings from the most recent business day.
     # The function will search backwards from yesterday to find the last day with available data.
-    recent_filings_df = get_recent_8k_filings(days_ago=1, user_agent=user_agent)
+    recent_filings_df = get_recent_8k_filings(days_ago=0, user_agent=user_agent)
 
     if recent_filings_df.empty:
         print("No recent 8-K filings found.")
@@ -207,6 +238,7 @@ async def main():
 
     print(f"Found {len(recent_filings_df)} filings. Processing first 5...")
     processed_filings: List[CorporateAction] = []
+    metrics = Metrics()
 
     for i, (_, row) in enumerate(recent_filings_df.head().iterrows()):
         file_name = row['file_name']
@@ -221,11 +253,18 @@ async def main():
         classification = classify_action_type(content)
 
         cik = header_data.get('CENTRAL INDEX KEY', 'N/A')
-        print(f"DEBUG: Processing {header_data.get('COMPANY CONFORMED NAME', 'N/A')} with CIK {cik}")
+        print(f"Processing {header_data.get('COMPANY CONFORMED NAME', 'N/A')} with CIK {cik}")
         ticker = cik_mapper.get_ticker_by_cik(cik) or 'N/A'
         exchange = cik_mapper.get_exchange_by_cik(cik) or None
         exchange_mic = _to_mic(exchange) if exchange else None
-        print(f"DEBUG: Found Ticker: {ticker}, Exchange: {exchange} -> MIC: {exchange_mic}")
+        print(f"Found Ticker: {ticker}, Exchange: {exchange} -> MIC: {exchange_mic}")
+
+        # Collect all tickers for this CIK and compute extras for details
+        all_tickers = cik_mapper.get_all_tickers_by_cik(cik) or []
+        primary = None if ticker == 'N/A' else ticker
+        extra_tickers = [t for t in all_tickers if (primary and t != primary)]
+        if all_tickers:
+            print(f"Tickers for CIK {cik}: all={all_tickers} primary={primary} extras={extra_tickers}")
 
         # Construct the full .txt URL to pass to the converter
         txt_url = f"https://www.sec.gov/Archives/{file_name}"
@@ -248,6 +287,11 @@ async def main():
                 ticker=ticker if ticker and ticker != 'N/A' else None,
                 exchange_mic=exchange_mic,
             ),
+            extras={
+                "all_tickers": all_tickers,
+                "extra_tickers": extra_tickers,
+                "primary_ticker": primary,
+            } if all_tickers else None,
             sources=[
                 SourceInfo(
                     source=SourceSystem.SEC_EDGAR,
@@ -258,9 +302,105 @@ async def main():
                     text_excerpt=(parsed_text[:300] if parsed_text else None),
                 )
             ],
-            notes=(f"classification: {classification}" if classification else None),
+            notes=(classification if classification else None),
         )
+        
+        # LLM extraction pass (safe/no-op if disabled or not configured)
+        llm_res = None
+        if parsed_text:
+            try:
+                llm_res = llm_extract(parsed_text, company=header_data.get('COMPANY CONFORMED NAME', None))
+                if llm_res:
+                    ca = apply_llm_to_corporate_action(ca, llm_res)
+            except Exception as e:
+                print(f"LLM extraction skipped due to error: {e}")
+
+        # Phase 1: If effective_date is still missing, try date enrichment using LLM estimates
+        try:
+            enrich_enabled = os.getenv("LLM_DATE_ENRICHMENT_ENABLED", "true").strip().lower() in {"1", "true", "yes"}
+            followup_enabled = os.getenv("SEC_FOLLOWUP_ENABLED", "true").strip().lower() in {"1", "true", "yes"}
+        except Exception:
+            enrich_enabled, followup_enabled = True, True
+
+        candidates = []
+        promoted_date = None
+        followup_used_flag = False
+        if enrich_enabled and not ca.effective_date:
+            # From primary LLM pass
+            if llm_res and getattr(llm_res, "effective_date_estimates", None):
+                try:
+                    for c in llm_res.effective_date_estimates or []:
+                        candidates.append({**c.model_dump(exclude_none=True), "method": "llm_primary"})
+                except Exception:
+                    pass
+
+            # Phase 2 (optional): SEC submissions follow-up across a few recent filings
+            if followup_enabled and cik and cik != 'N/A':
+                try:
+                    followups = get_recent_company_filings(cik, user_agent, limit=3, form_filter=[
+                        "8-K", "8-K/A", "DEFM14A", "DEFA14A", "S-4", "S-4/A", "425", "424B2", "424B3"
+                    ])
+                    for fu in followups:
+                        fu_url = fu.get("html_url") or fu.get("txt_url")
+                        if not fu_url or fu_url == (html_link or txt_url):
+                            continue
+                        fu_text = parse_html_to_text(fu_url, user_agent)
+                        if not fu_text:
+                            continue
+                        fu_res = llm_extract(fu_text, company=header_data.get('COMPANY CONFORMED NAME', None))
+                        if not fu_res:
+                            continue
+                        if getattr(fu_res, "effective_date", None):
+                            candidates.append({
+                                "kind": "definitive",
+                                "date": fu_res.effective_date,
+                                "qualifier": "from follow-up filing",
+                                "confidence": 0.9,
+                                "method": "llm_followup",
+                                "source_url": fu_url,
+                            })
+                        if getattr(fu_res, "effective_date_estimates", None):
+                            for c in fu_res.effective_date_estimates or []:
+                                cand = {**c.model_dump(exclude_none=True), "method": "llm_followup", "source_url": fu_url}
+                                candidates.append(cand)
+                except Exception as e:
+                    print(f"[Follow-up] Skipped due to error: {e}")
+
+            # Resolve and possibly promote
+            if candidates:
+                try:
+                    promoted_date, extras_patch = resolve_effective_date(candidates=candidates)
+                    if promoted_date:
+                        ca = ca.model_copy(update={"effective_date": promoted_date})
+                    # Attach extras for display/persistence
+                    new_extras = _merge_extras(ca.extras, {
+                        **extras_patch,
+                        "date_enrichment": True,
+                        "followup_used": any((c.get("method") == "llm_followup") for c in candidates),
+                        "followup_candidates": len(candidates),
+                    })
+                    ca = ca.model_copy(update={"extras": new_extras})
+                except Exception as e:
+                    print(f"[Resolver] Error resolving effective date: {e}")
+        # Record metrics for this filing
+        try:
+            followup_used_flag = any((c.get("method") == "llm_followup") for c in candidates)
+            metrics.record(
+                effective_date=bool(ca.effective_date),
+                had_estimate=bool(candidates),
+                promoted=bool(promoted_date),
+                followup_used=followup_used_flag,
+            )
+        except Exception:
+            pass
         processed_filings.append(ca)
+
+    # Persist results to the database (public schema)
+    try:
+        saved = persist_corporate_actions(processed_filings)
+        print(f"\n[DB] Persisted {saved} corporate actions to the database.")
+    except Exception as e:
+        print(f"[DB Error] Failed to persist filings: {e}")
 
     print("\n--- Processed Corporate Action Filings ---")
     for ca in processed_filings:
@@ -268,7 +408,7 @@ async def main():
         doc_type = src.doc_type if src else 'N/A'
         filed_date = src.filing_date.isoformat() if (src and src.filing_date) else 'N/A'
         accession = src.reference_id if (src and src.reference_id) else 'N/A'
-        print(f"\nCompany: {ca.issuer.name or 'N/A'} ({(ca.security.ticker or 'N/A')}:{(ca.security.exchange_mic or 'N/A')})")
+        print(f"\nCompany: {ca.issuer.name or 'N/A'} ({(ca.security.ticker or 'N/A')}:{(_mic_to_exchange_name(ca.security.exchange_mic) if ca.security.exchange_mic else 'N/A')})")
         print(f"Action Type: {ca.action_type} | {ca.notes or ''}")
         print(f"Form Type: {doc_type}")
         print(f"Filed Date: {filed_date}")
@@ -278,11 +418,20 @@ async def main():
             print(f"{src.text_excerpt[:200]}...")
     print("-----------------------------------------")
 
-    # Send notifications
+    # Send notifications via Telegram
     await send_to_telegram(processed_filings)
 
     # Send notifications via Gmail
     await asyncio.to_thread(send_gmail_email, processed_filings)
+
+    # Metrics summary and optional persistence
+    try:
+        metrics.print_summary()
+        metrics_file = os.getenv("METRICS_FILE")
+        if metrics_file:
+            metrics.save_jsonl(metrics_file)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
