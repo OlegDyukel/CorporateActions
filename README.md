@@ -6,13 +6,13 @@ This project tracks and reports corporate action events across multiple markets 
 
 The application follows a simple data processing pipeline:
 
-1.  **Discover sources**: Iterate over the enabled market connectors (e.g., SEC EDGAR, future EU/JP sources).
+1.  **Discover sources**: Iterate over the enabled market connectors (e.g., SEC EDGAR, EU/JP sources).
 2.  **Fetch listings/feeds**: Download daily indexes or RSS/JSON feeds for recent announcements/filings.
 3.  **Fetch full content**: Retrieve the full text or HTML for each item.
 4.  **Parse & normalize**: Extract headers/metadata and normalize into the internal `CorporateAction` model.
 5.  **Classify corporate actions**: Determine event types (e.g., merger, dividend, split).
 6.  **Enrich**: Map to tickers/exchanges and add context as available per market.
-7.  **Notify**: Send formatted summaries to configured channels.
+7.  **Notify**: Load into a database and (optionally) send formatted summaries to configured channels.
 
 ## Features
 
