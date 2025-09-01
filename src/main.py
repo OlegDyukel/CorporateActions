@@ -27,7 +27,11 @@ from src.models.corporate_action_model import (
 )
 from src.sources.master_index import get_recent_8k_filings
 from src.processors.filing_processor import fetch_filing_text
-from src.processors.filing_parser import parse_filing_header, classify_action_type
+from src.processors.filing_parser import (
+    parse_filing_header,
+    classify_action_type,
+    extract_8k_items,
+)
 from src.processors.html_parser import parse_html_to_text
 from src.utils.cik_mapper import CIKMapper
 from src.utils.filing_link_converter import convert_txt_link_to_html
@@ -125,6 +129,12 @@ def format_filing_for_display(filing: CorporateAction) -> str:
             )
         )
     )
+    items = None
+    try:
+        items = (getattr(filing, "extras", None) or {}).get("eight_k_items")
+    except Exception:
+        items = None
+    items_line = f"<b>8-K Items:</b> {', '.join(items)}\n" if items else ""
     return (
         f"<b>Company:</b> {filing.issuer.name or 'N/A'}\n"
         f"<b>Trading Ticker:</b> {filing.security.ticker or 'N/A'}\n"
@@ -133,6 +143,7 @@ def format_filing_for_display(filing: CorporateAction) -> str:
         + (f"<b>Classification:</b> {classification_note}\n" if classification_note else "")
         + f"<b>Form Type:</b> {doc_type}\n"
         + f"<b>Filed Date:</b> {filed_date}\n"
+        + items_line
         + effective_line
         + f"<b>Accession No.:</b> {accession}\n"
         + f"<a href='{link}'>Link to Filing</a>"
@@ -182,10 +193,16 @@ def send_gmail_email(filings: List[CorporateAction]):
         est_txt = None
         if not f.effective_date:
             est_txt = format_estimate_for_display(getattr(f, "extras", None))
+        items = None
+        try:
+            items = (getattr(f, "extras", None) or {}).get("eight_k_items")
+        except Exception:
+            items = None
         lines.append(
             "\n".join([
                 f"Company: {f.issuer.name or 'N/A'} ({f.security.ticker or 'N/A'})",
                 f"Filed Date: {filed_date}",
+                (f"8-K Items: {', '.join(items)}" if items else ""),
                 (
                     f"Effective Date: {f.effective_date.isoformat()}"
                     if f.effective_date
@@ -273,9 +290,28 @@ async def main():
         # Parse the HTML content to get clean text
         parsed_text = parse_html_to_text(html_link, user_agent)
 
+        # Extract 8-K Items from the filing text
+        eight_k_items = extract_8k_items(parsed_text or content)
+        if eight_k_items:
+            try:
+                print(f"Detected 8-K Items: {eight_k_items}")
+            except Exception:
+                pass
+
         form_type_str = header_data.get('CONFORMED SUBMISSION TYPE', 'N/A')
         filed_as_of = header_data.get('FILED AS OF DATE', '')
         accession_number = header_data.get('ACCESSION NUMBER', 'N/A')
+
+        # Build extras bag
+        extras_dict = {}
+        if all_tickers:
+            extras_dict.update({
+                "all_tickers": all_tickers,
+                "extra_tickers": extra_tickers,
+                "primary_ticker": primary,
+            })
+        if eight_k_items:
+            extras_dict["eight_k_items"] = eight_k_items
 
         ca = CorporateAction(
             action_type=_map_classification_to_action_type(classification),
@@ -287,11 +323,7 @@ async def main():
                 ticker=ticker if ticker and ticker != 'N/A' else None,
                 exchange_mic=exchange_mic,
             ),
-            extras={
-                "all_tickers": all_tickers,
-                "extra_tickers": extra_tickers,
-                "primary_ticker": primary,
-            } if all_tickers else None,
+            extras=(extras_dict or None),
             sources=[
                 SourceInfo(
                     source=SourceSystem.SEC_EDGAR,
@@ -322,24 +354,45 @@ async def main():
         except Exception:
             enrich_enabled, followup_enabled = True, True
 
+        # Debug: show enrichment flags and whether we already have an effective date
+        try:
+            print(f"[Enrichment] Flags: date_enrichment={enrich_enabled}, followup={followup_enabled}; has_effective={bool(ca.effective_date)}")
+        except Exception:
+            pass
+
         candidates = []
         promoted_date = None
         followup_used_flag = False
         if enrich_enabled and not ca.effective_date:
+            try:
+                print("[Enrichment] Starting effective date enrichment")
+            except Exception:
+                pass
             # From primary LLM pass
+            primary_added = 0
             if llm_res and getattr(llm_res, "effective_date_estimates", None):
                 try:
                     for c in llm_res.effective_date_estimates or []:
                         candidates.append({**c.model_dump(exclude_none=True), "method": "llm_primary"})
+                        primary_added += 1
+                except Exception:
+                    pass
+                try:
+                    print(f"[Enrichment] Primary LLM estimates added: {primary_added}")
                 except Exception:
                     pass
 
             # Phase 2 (optional): SEC submissions follow-up across a few recent filings
             if followup_enabled and cik and cik != 'N/A':
                 try:
+                    before_followup = len(candidates)
                     followups = get_recent_company_filings(cik, user_agent, limit=3, form_filter=[
                         "8-K", "8-K/A", "DEFM14A", "DEFA14A", "S-4", "S-4/A", "425", "424B2", "424B3"
                     ])
+                    try:
+                        print(f"[Enrichment] Follow-up filings fetched: {len(followups)}")
+                    except Exception:
+                        pass
                     for fu in followups:
                         fu_url = fu.get("html_url") or fu.get("txt_url")
                         if not fu_url or fu_url == (html_link or txt_url):
@@ -363,12 +416,20 @@ async def main():
                             for c in fu_res.effective_date_estimates or []:
                                 cand = {**c.model_dump(exclude_none=True), "method": "llm_followup", "source_url": fu_url}
                                 candidates.append(cand)
+                    try:
+                        print(f"[Enrichment] Follow-up candidates added: {len(candidates) - before_followup}")
+                    except Exception:
+                        pass
                 except Exception as e:
                     print(f"[Follow-up] Skipped due to error: {e}")
 
             # Resolve and possibly promote
             if candidates:
                 try:
+                    try:
+                        print(f"[Enrichment] Total candidates before resolve: {len(candidates)}")
+                    except Exception:
+                        pass
                     promoted_date, extras_patch = resolve_effective_date(candidates=candidates)
                     if promoted_date:
                         ca = ca.model_copy(update={"effective_date": promoted_date})
@@ -380,6 +441,16 @@ async def main():
                         "followup_candidates": len(candidates),
                     })
                     ca = ca.model_copy(update={"extras": new_extras})
+                    try:
+                        print(f"[Enrichment] Promoted date: {promoted_date}")
+                        rec = extras_patch.get("effective_date_recommendation")
+                        if rec:
+                            print(
+                                f"[Enrichment] Recommendation: kind={rec.get('kind')}, conf={rec.get('confidence')}, "
+                                f"date_or_qualifier={rec.get('date') or rec.get('qualifier')}, method={rec.get('method')}"
+                            )
+                    except Exception:
+                        pass
                 except Exception as e:
                     print(f"[Resolver] Error resolving effective date: {e}")
         # Record metrics for this filing
@@ -413,6 +484,12 @@ async def main():
         print(f"Form Type: {doc_type}")
         print(f"Filed Date: {filed_date}")
         print(f"Accession No.: {accession}")
+        try:
+            items = (getattr(ca, "extras", None) or {}).get("eight_k_items")
+            if items:
+                print(f"8-K Items: {items}")
+        except Exception:
+            pass
         if src and src.text_excerpt:
             print("Parsed Text Snippet:")
             print(f"{src.text_excerpt[:200]}...")

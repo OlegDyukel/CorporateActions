@@ -1,5 +1,5 @@
 import re
-from typing import Dict
+from typing import Dict, List
 
 def parse_filing_header(content: str) -> Dict[str, str]:
     """
@@ -60,3 +60,26 @@ def classify_action_type(content: str) -> str:
         return 'Completion of Acquisition/Disposition'
 
     return 'Unclassified'
+
+
+def extract_8k_items(text: str) -> List[str]:
+    """
+    Extracts the set of 8-K Item numbers from filing text.
+
+    Matches patterns like:
+    - "Item 1.01", "ITEM 5.02.", "Items 9.01 (Financial Statements and Exhibits)"
+
+    Returns a de-duplicated list preserving first-seen order, e.g. ["1.01", "5.02", "9.01"].
+    """
+    if not text:
+        return []
+    items: List[str] = []
+    seen = set()
+    # Case-insensitive match for 'Item' or 'Items' followed by X.YY where X in 1-9 and YY in 00-99
+    pattern = re.compile(r"\bitems?\s+([1-9]\.[0-9]{2})\b", re.IGNORECASE)
+    for m in pattern.finditer(text):
+        code = m.group(1)
+        if code not in seen:
+            seen.add(code)
+            items.append(code)
+    return items

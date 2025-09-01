@@ -119,7 +119,8 @@ def _insert_or_update_corporate_action(engine: Engine, params: Dict[str, Any]) -
 
 
 def _replace_sources(engine: Engine, event_id: str, sources: List[SourceInfo]) -> None:
-    del_sql = text("DELETE FROM public.corporate_action_sources WHERE event_id = :event_id")
+    # Merge/upsert semantics: preserve existing rows; upsert by unique key
+    # (event_id, source, COALESCE(reference_id, source_url), COALESCE(doc_type,'')).
     ins_sql = text(
         """
         INSERT INTO public.corporate_action_sources (
@@ -129,10 +130,37 @@ def _replace_sources(engine: Engine, event_id: str, sources: List[SourceInfo]) -
             :event_id, :source, :doc_type, :source_url, :filing_date,
             :retrieval_time, :reference_id, :content_sha256, :text_excerpt
         )
+        ON CONFLICT (event_id, source, reference_id)
+        DO UPDATE SET
+            doc_type = EXCLUDED.doc_type,
+            source_url = EXCLUDED.source_url,
+            filing_date = EXCLUDED.filing_date,
+            retrieval_time = EXCLUDED.retrieval_time,
+            content_sha256 = EXCLUDED.content_sha256,
+            text_excerpt = EXCLUDED.text_excerpt
         """
     )
+
+    ins_url_sql = text(
+        """
+        INSERT INTO public.corporate_action_sources (
+            event_id, source, doc_type, source_url, filing_date,
+            retrieval_time, reference_id, content_sha256, text_excerpt
+        ) VALUES (
+            :event_id, :source, :doc_type, :source_url, :filing_date,
+            :retrieval_time, :reference_id, :content_sha256, :text_excerpt
+        )
+        ON CONFLICT (event_id, source, source_url)
+        DO UPDATE SET
+            doc_type = EXCLUDED.doc_type,
+            filing_date = EXCLUDED.filing_date,
+            retrieval_time = EXCLUDED.retrieval_time,
+            content_sha256 = EXCLUDED.content_sha256,
+            text_excerpt = EXCLUDED.text_excerpt
+        """
+    )
+
     with engine.begin() as conn:
-        conn.execute(del_sql, {"event_id": event_id})
         for s in sources:
             params = {
                 "event_id": event_id,
@@ -145,7 +173,10 @@ def _replace_sources(engine: Engine, event_id: str, sources: List[SourceInfo]) -
                 "content_sha256": s.content_sha256,
                 "text_excerpt": s.text_excerpt,
             }
-            conn.execute(ins_sql, params)
+            if s.reference_id:
+                conn.execute(ins_sql, params)
+            else:
+                conn.execute(ins_url_sql, params)
 
 
 def _replace_consideration_legs(engine: Engine, event_id: str, legs: Optional[List[ConsiderationLeg]]) -> None:
